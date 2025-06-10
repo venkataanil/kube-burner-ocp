@@ -33,7 +33,7 @@ jobs:
     namespacedIterations: true
     waitWhenFinished: true
     skipIndexing: true
-    jobPause: 1m
+    jobPause: 30s
     namespaceLabels:
       security.openshift.io/scc.podSecurityLabelSync: false
       pod-security.kubernetes.io/enforce: privileged
@@ -51,7 +51,7 @@ jobs:
     burst: {{.BURST}}
     namespacedIterations: false
     waitWhenFinished: true
-    jobPause: 15m
+    jobPause: 30s
     skipIndexing: true
     namespaceLabels:
       security.openshift.io/scc.podSecurityLabelSync: false
@@ -76,7 +76,7 @@ jobs:
     waitWhenFinished: true
     preLoadImages: true
     preLoadPeriod: 15s
-    jobPause: 10m
+    jobPause: 30s
     cleanup: false
     skipIndexing: true
     namespaceLabels:
