@@ -27,12 +27,16 @@ spec:
   - type: Allow
     to:
       cidrSelector: 192.168.0.0/16
-{{ if .gatewayIPs }}
+{{ if .nodeGwMap }}
   # Cluster default gateways (for --gateway-check, one per AZ)
-  {{- range $gw := splitList "," .gatewayIPs }}
+  {{- $seen := dict }}
+  {{- range $node, $gw := .nodeGwMap | fromJson }}
+    {{- if not (hasKey $seen $gw) }}
+      {{- $_ := set $seen $gw true }}
   - type: Allow
     to:
       cidrSelector: {{ $gw }}/32
+    {{- end }}
   {{- end }}
 {{ end }}
   # Cluster DNS

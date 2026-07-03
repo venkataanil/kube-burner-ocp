@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/kube-burner/kube-burner/v2/pkg/config"
@@ -36,11 +35,10 @@ var cudnMeasurementFactoryMap = map[string]kubeburnermeasurements.NewMeasurement
 	"cudnLatency": measurements.NewCudnLatencyMeasurementFactory,
 }
 
-// getNodeGatewayMap builds a mapping of nodeInternalIP -> gatewayIP by reading
-// the k8s.ovn.org/l3-gateway-config annotation from all worker nodes. It returns
-// (1) a ';'-delimited mapping string ("nodeIP=gatewayIP;...") and
-// (2) a comma-separated string of unique gateway IPs (for NetworkPolicy/EgressFirewall rules).
-func getNodeGatewayMap() (string, string) {
+// getNodeGatewayMap builds a JSON mapping of nodeInternalIP -> gatewayIP by reading
+// the k8s.ovn.org/l3-gateway-config annotation from all worker nodes.
+// Returns e.g. {"10.0.1.5":"192.168.1.1","10.0.2.6":"192.168.2.1"}
+func getNodeGatewayMap() string {
 	kubeClientProvider := config.NewKubeClientProvider("", "")
 	clientSet, _ := kubeClientProvider.ClientSet(0, 0)
 	nodes, err := clientSet.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
@@ -50,8 +48,7 @@ func getNodeGatewayMap() (string, string) {
 		log.Fatalf("Error listing worker nodes: %v", err)
 	}
 
-	var mapData strings.Builder
-	uniqueGateways := make(map[string]struct{})
+	gwMap := make(map[string]string)
 
 	for _, node := range nodes.Items {
 		gwConfig, exists := node.Annotations["k8s.ovn.org/l3-gateway-config"]
@@ -85,20 +82,18 @@ func getNodeGatewayMap() (string, string) {
 		}
 
 		log.Infof("Node %s (IP: %s) -> gateway: %s", node.Name, nodeIP, nextHop)
-		mapData.WriteString(nodeIP + "=" + nextHop + ";")
-		uniqueGateways[nextHop] = struct{}{}
+		gwMap[nodeIP] = nextHop
 	}
 
-	if mapData.Len() == 0 {
+	if len(gwMap) == 0 {
 		log.Fatal("Unable to detect gateway IPs: no worker node has the k8s.ovn.org/l3-gateway-config annotation with a valid next-hop")
 	}
 
-	gateways := make([]string, 0, len(uniqueGateways))
-	for gw := range uniqueGateways {
-		gateways = append(gateways, gw)
+	jsonBytes, err := json.Marshal(gwMap)
+	if err != nil {
+		log.Fatalf("Error marshaling gateway map to JSON: %v", err)
 	}
-
-	return mapData.String(), strings.Join(gateways, ",")
+	return string(jsonBytes)
 }
 
 // NewCudnDensity holds cudn-density workload
@@ -179,9 +174,7 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 			AdditionalVars["GATEWAY_CHECK"] = gatewayCheck
 			AdditionalVars["BGP"] = bgp
 			if gatewayCheck {
-				gatewayMapData, uniqueGateways := getNodeGatewayMap()
-				AdditionalVars["GATEWAY_MAP_DATA"] = gatewayMapData
-				AdditionalVars["GATEWAY_IPS"] = uniqueGateways
+				AdditionalVars["NODE_GW_MAP"] = getNodeGatewayMap()
 			}
 			wh.SetMeasurements(cudnMeasurementFactoryMap)
 			rc = RunWorkload(cmd, wh, cmd.Name()+".yml")

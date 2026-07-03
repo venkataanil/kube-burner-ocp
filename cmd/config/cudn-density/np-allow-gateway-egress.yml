@@ -16,9 +16,13 @@ spec:
       app: client
   egress:
   - to:
-    {{- range $gw := splitList "," .gatewayIPs }}
+    {{- $seen := dict }}
+    {{- range $node, $gw := .nodeGwMap | fromJson }}
+      {{- if not (hasKey $seen $gw) }}
+        {{- $_ := set $seen $gw true }}
     - ipBlock:
         cidr: {{ $gw }}/32
+      {{- end }}
     {{- end }}
   - to: []
     ports:

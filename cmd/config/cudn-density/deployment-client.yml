@@ -64,7 +64,7 @@ spec:
                 {{- end }}
               {{- end }}
               {{- if $.gatewayCheck }}
-              GATEWAY=$(grep "^$NODE_IP=" /etc/gateway-map/gateways | cut -d= -f2);
+              GW_JSON='{{ $.nodeGwMap }}'; GATEWAY="${GW_JSON#*\"${NODE_IP}\":\"}"; GATEWAY="${GATEWAY%%\"*}";
               ping -c 1 -W 3 $GATEWAY >/dev/null 2>&1 && echo "OK->gateway($GATEWAY)" || echo "FAIL->gateway($GATEWAY)";
               {{- end }}
               sleep 10
@@ -77,7 +77,7 @@ spec:
             while true; do
               curl --fail -sS http://cudn-svc.cudn-density-{{ $.Iteration }}.svc.cluster.local:8080 -o /dev/null 2>/dev/null && echo "OK->ns-{{ $.Iteration }}(local)" || echo "FAIL->ns-{{ $.Iteration }}(local)";
               {{- if $.gatewayCheck }}
-              GATEWAY=$(grep "^$NODE_IP=" /etc/gateway-map/gateways | cut -d= -f2);
+              GW_JSON='{{ $.nodeGwMap }}'; GATEWAY="${GW_JSON#*\"${NODE_IP}\":\"}"; GATEWAY="${GATEWAY%%\"*}";
               ping -c 1 -W 3 $GATEWAY >/dev/null 2>&1 && echo "OK->gateway($GATEWAY)" || echo "FAIL->gateway($GATEWAY)";
               {{- end }}
               sleep 10
@@ -97,17 +97,14 @@ spec:
             command:
             - "/bin/sh"
             - "-c"
-            - "curl --fail -sS http://cudn-svc.cudn-density-{{ $peerNs }}.svc.cluster.local:8080/ -o /dev/null{{ if .gatewayCheck }} && GATEWAY=$(grep \"^$NODE_IP=\" /etc/gateway-map/gateways | cut -d= -f2) && ping -c 1 -W 3 $GATEWAY{{ end }}"
+            - |-
+              curl --fail -sS http://cudn-svc.cudn-density-{{ $peerNs }}.svc.cluster.local:8080/ -o /dev/null{{ if .gatewayCheck }} && GW_JSON='{{ .nodeGwMap }}' && GATEWAY="${GW_JSON#*\"${NODE_IP}\":\"}" && GATEWAY="${GATEWAY%%\"*}" && ping -c 1 -W 3 $GATEWAY{{ end }}
           periodSeconds: 1
           timeoutSeconds: 5
           failureThreshold: 60
         volumeMounts:
         - name: podinfo
           mountPath: /etc/podlabels
-        {{- if .gatewayCheck }}
-        - name: gateway-map
-          mountPath: /etc/gateway-map
-        {{- end }}
       volumes:
       - name: podinfo
         downwardAPI:
@@ -115,11 +112,6 @@ spec:
             - path: "labels"
               fieldRef:
                 fieldPath: metadata.labels
-      {{- if .gatewayCheck }}
-      - name: gateway-map
-        configMap:
-          name: gateway-map
-      {{- end }}
       restartPolicy: Always
   strategy:
     type: RollingUpdate
