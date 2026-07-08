@@ -219,6 +219,8 @@ jobs:
       - objectTemplate: np-allow-gateway-egress.yml
         replicas: 1
         churn: false
+        group:
+          id: 2
         inputVars:
           nodeGwMap: '{{.NODE_GW_MAP}}'
 {{ end }}
