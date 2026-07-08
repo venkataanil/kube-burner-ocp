@@ -127,6 +127,7 @@ jobs:
       {{ if .BGP }}
       - objectTemplate: ra.yml
         replicas: 1
+        churn: false
         group:
           id: 0
         repeatEveryNIterations: {{.NAMESPACES_PER_CUDN}}
