@@ -81,7 +81,7 @@ func getNodeGatewayMap() string {
 			continue
 		}
 
-		log.Infof("Node %s (IP: %s) -> gateway: %s", node.Name, nodeIP, nextHop)
+		log.Debugf("Node %s (IP: %s) -> gateway: %s", node.Name, nodeIP, nextHop)
 		gwMap[nodeIP] = nextHop
 	}
 
