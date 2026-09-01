@@ -2,7 +2,6 @@
 global:
   gc: {{.GC}}
   gcMetrics: {{.GC_METRICS}}
-  deletionStrategy: {{.DELETION_STRATEGY}}
 {{ if .PPROF }}
   measurements:
     - name: pprof
@@ -44,55 +43,78 @@ metricsEndpoints:
       metricsDirectory: collected-metrics-{{.UUID}}
 {{ end }}
 
+{{ $cudnJobName := ternary "cudn-density-create-cudn-l3" "cudn-density-create-cudn-l2" .ENABLE_LAYER_3 }}
 jobs:
-{{ if .OCPBUGS_85627_WORKAROUND }}
-  - name: cudn-density-workaround
-    namespace: redhat-ocpbugs-85627-wa
-    jobIterations: 1
-    qps: 20
-    burst: 20
-    namespacedIterations: false
-    preCreateNamespaces: true
-    waitWhenFinished: true
-    skipIndexing: true
-    cleanup: false
-    jobPause: 1m
-    namespaceLabels:
-      security.openshift.io/scc.podSecurityLabelSync: false
-      pod-security.kubernetes.io/enforce: privileged
-      pod-security.kubernetes.io/audit: privileged
-      pod-security.kubernetes.io/warn: privileged
-    objects:
-      - objectTemplate: workaround-sa.yml
-        replicas: 1
-
-      - objectTemplate: workaround-rolebinding.yml
-        replicas: 1
-
-      - objectTemplate: workaround-secret.yml
-        replicas: 1
-
-      - objectTemplate: workaround-daemonset.yml
-        replicas: 1
-{{ end }}
-
-  - name: cudn-density
+  # Job 1: Create namespaces with CUDN labels
+  - name: cudn-density-create-namespaces
     namespace: cudn-density
     jobIterations: {{.JOB_ITERATIONS}}
     qps: {{.QPS}}
     burst: {{.BURST}}
     namespacedIterations: true
-    preCreateNamespaces: true
     waitWhenFinished: true
-    preLoadImages: true
+    skipIndexing: true
     namespaceLabels:
       security.openshift.io/scc.podSecurityLabelSync: false
       pod-security.kubernetes.io/enforce: privileged
       pod-security.kubernetes.io/audit: privileged
       pod-security.kubernetes.io/warn: privileged
       k8s.ovn.org/primary-user-defined-network: ""
+    objects:
+      - objectTemplate: configmap.yml
+        replicas: 1
+
+  # Job 2: Create CUDNs (cluster-scoped)
+  - name: {{ $cudnJobName }}
+    {{- $numCudn := div .JOB_ITERATIONS .NAMESPACES_PER_CUDN }}
+    jobIterations: {{$numCudn}}
+    qps: {{.QPS}}
+    burst: {{.BURST}}
+    namespacedIterations: false
+    waitWhenFinished: true
+    jobPause: {{.JOB_PAUSE}}
     measurements:
       - name: cudnLatency
+    objects:
+      {{ if .ENABLE_LAYER_3 }}
+      - objectTemplate: cudn-l3.yml
+        replicas: 1
+        inputVars:
+          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
+          total_namespaces: {{.JOB_ITERATIONS}}
+          cudn_per_ra: 1
+        waitOptions:
+          customStatusPaths:
+            - key: .conditions[] | select(.type=="NetworkCreated") | .status
+              value: "True"
+      {{ else }}
+      - objectTemplate: cudn-l2.yml
+        replicas: 1
+        inputVars:
+          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
+          total_namespaces: {{.JOB_ITERATIONS}}
+          cudn_per_ra: 1
+        waitOptions:
+          customStatusPaths:
+            - key: .conditions[] | select(.type=="NetworkCreated") | .status
+              value: "True"
+      {{ end }}
+      {{ if .BGP }}
+      - objectTemplate: ra.yml
+        replicas: 1
+        repeatEveryNIterations: 1
+      {{ end }}
+
+  # Job 3: Deploy infra + workload (services, NPs, EgressFirewall, quotas, deployments)
+  - name: cudn-density-workload
+    namespace: cudn-density
+    jobIterations: {{.JOB_ITERATIONS}}
+    qps: {{.QPS}}
+    burst: {{.BURST}}
+    namespacedIterations: true
+    waitWhenFinished: true
+    preLoadImages: true
+    measurements:
       - name: podLatency
 {{ if ne .POD_READY_THRESHOLD 0 }}
         thresholds:
@@ -106,221 +128,108 @@ jobs:
       percent: {{.CHURN_PERCENT}}
       delay: {{.CHURN_DELAY}}
       mode: {{.CHURN_MODE}}
-{{ if ne .INCREMENTAL_STEP_SIZE 0 }}
-    incrementalLoad:
-      startIterations: {{.INCREMENTAL_STEP_SIZE}}
-      totalIterations: {{.JOB_ITERATIONS}}
-      stepDelay: {{.INCREMENTAL_STEP_DELAY}}
-      pattern:
-        type: {{.INCREMENTAL_PATTERN}}
-{{ if eq .INCREMENTAL_PATTERN "linear" }}
-        linear:
-          stepSize: {{.INCREMENTAL_STEP_SIZE}}
-{{ else }}
-        exponential:
-          base: {{.INCREMENTAL_EXP_BASE}}
-{{ end }}
-{{ end }}
-    jobPause: {{.JOB_PAUSE}}
+    jobPause: 2m
     metricsClosing: afterJobPause
     cleanup: false
+    namespaceLabels:
+      security.openshift.io/scc.podSecurityLabelSync: false
+      pod-security.kubernetes.io/enforce: privileged
+      pod-security.kubernetes.io/audit: privileged
+      pod-security.kubernetes.io/warn: privileged
+      k8s.ovn.org/primary-user-defined-network: ""
     objects:
-      {{ if .ENABLE_LAYER_3 }}
-      - objectTemplate: cudn-l3.yml
+{{ if .VIRT }}
+{{ if .SSH_CHECK }}
+      - objectTemplate: secret_ssh_public.yml
         replicas: 1
-        churn: false
-        group:
-          id: 1
-          pauseBeforeGC: {{.JOB_PAUSE}}
-        repeatEveryNIterations: {{.NAMESPACES_PER_CUDN}}
         inputVars:
-          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-          total_namespaces: {{.JOB_ITERATIONS}}
-          cudns_per_ra: {{.CUDNS_PER_RA}}
-        waitOptions:
-          customStatusPaths:
-            - key: .conditions[] | select(.type=="NetworkAllocationSucceeded") | .status
-              value: "True"
-      {{ else }}
-      - objectTemplate: cudn-l2.yml
+          name: cudn-density-ssh
+          publicKeyPath: {{ .publicKey }}
+
+      - objectTemplate: vm-cudn-ssh.yml
         replicas: 1
-        churn: false
-        group:
-          id: 1
-          pauseBeforeGC: {{.JOB_PAUSE}}
-        repeatEveryNIterations: {{.NAMESPACES_PER_CUDN}}
         inputVars:
-          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-          total_namespaces: {{.JOB_ITERATIONS}}
-          cudns_per_ra: {{.CUDNS_PER_RA}}
-        waitOptions:
-          customStatusPaths:
-            - key: .conditions[] | select(.type=="NetworkAllocationSucceeded") | .status
-              value: "True"
-      {{ end }}
-      {{ if .BGP }}
-      - objectTemplate: ra.yml
+          vmImage: {{.VM_IMAGE}}
+          sshPublicKeySecret: cudn-density-ssh
+{{ else }}
+      - objectTemplate: vm-cudn.yml
         replicas: 1
-        churn: false
-        group:
-          id: 0
-        repeatEveryNIterations: {{mul .NAMESPACES_PER_CUDN .CUDNS_PER_RA}}
-      {{ end }}
-
-      - objectTemplate: configmap.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
-
+        inputVars:
+          vmImage: {{.VM_IMAGE}}
+{{ end }}
+{{ end }}
       - objectTemplate: service.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
 
       - objectTemplate: service-headless.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
 
       - objectTemplate: service-server.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
-
-      - objectTemplate: np-deny-all.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
 
       - objectTemplate: np-allow-cudn-ingress.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
 
       - objectTemplate: np-allow-cudn-egress.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
 
       - objectTemplate: np-allow-app-ingress.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
 
       - objectTemplate: np-allow-app-egress.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
 
       - objectTemplate: egressfirewall.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
         inputVars:
-          nodeGwMap: '{{ if .GATEWAY_CHECK }}{{.NODE_GW_MAP}}{{ end }}'
+          gatewayIP: "{{ if .GATEWAY_CHECK }}{{.GATEWAY_IP}}{{ end }}"
 
       - objectTemplate: resourcequota.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
 
       - objectTemplate: limitrange.yml
         replicas: 1
         churn: false
-        group:
-          id: 2
-
-{{ if .GATEWAY_CHECK }}
-      - objectTemplate: np-allow-gateway-egress.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
-        inputVars:
-          nodeGwMap: '{{.NODE_GW_MAP}}'
-{{ end }}
 
       - objectTemplate: deployment-server.yml
         replicas: 1
-        group:
-          id: 2
         inputVars:
           podReplicas: 2
 
       - objectTemplate: deployment-app.yml
         replicas: 1
-        group:
-          id: 2
         inputVars:
           podReplicas: 1
 
       - objectTemplate: deployment-client.yml
         replicas: 1
-        group:
-          id: 2
         inputVars:
           podReplicas: 1
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-          gatewayCheck: {{.GATEWAY_CHECK}}
-          nodeGwMap: '{{ if .GATEWAY_CHECK }}{{.NODE_GW_MAP}}{{ end }}'
+          gatewayIP: "{{ if .GATEWAY_CHECK }}{{.GATEWAY_IP}}{{ end }}"
 
-{{ if .GC }}
-  - name: cudn-density-cleanup-namespaces
-    jobType: delete
-    waitForDeletion: false
-    qps: {{.QPS}}
-    burst: {{.BURST}}
-    skipIndexing: true
-    objects:
-      - kind: Namespace
-        apiVersion: v1
-        labelSelector: {kube-burner.io/job: cudn-density}
-
-  - name: cudn-density-cleanup-cudns
-    jobType: delete
-    waitForDeletion: true
-    qps: {{.QPS}}
-    burst: {{.BURST}}
-    skipIndexing: true
-    objects:
-      {{ if .BGP }}
-      - kind: RouteAdvertisements
-        apiVersion: k8s.ovn.org/v1
-        labelSelector: {kube-burner.io/job: cudn-density}
-      {{ end }}
-      - kind: ClusterUserDefinedNetwork
-        apiVersion: k8s.ovn.org/v1
-        labelSelector: {kube-burner.io/job: cudn-density}
-
-{{ if .OCPBUGS_85627_WORKAROUND }}
-  - name: cudn-density-cleanup-workaround
-    jobType: delete
-    waitForDeletion: true
-    qps: 20
-    burst: 20
-    skipIndexing: true
-    objects:
-      - kind: Namespace
-        apiVersion: v1
-        labelSelector: {kube-burner.io/job: cudn-density-workaround}
+{{ if .GATEWAY_CHECK }}
+      - objectTemplate: np-allow-gateway-egress.yml
+        replicas: 1
+        churn: false
+        inputVars:
+          gatewayIP: {{.GATEWAY_IP}}
 {{ end }}
-{{ end }}
+

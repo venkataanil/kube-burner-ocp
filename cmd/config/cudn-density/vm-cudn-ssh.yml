@@ -1,0 +1,52 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: vm-cudn-{{.Iteration}}-{{.Replica}}
+  labels:
+    kubevirt.io/os: fedora
+spec:
+  runStrategy: Always
+  template:
+    metadata:
+      labels:
+        kubevirt.io/os: fedora
+    spec:
+      terminationGracePeriodSeconds: 0
+      accessCredentials:
+      - sshPublicKey:
+          propagationMethod:
+            noCloud: {}
+          source:
+            secret:
+              secretName: "{{ .sshPublicKeySecret }}-{{.Iteration}}"
+      domain:
+        resources:
+          requests:
+            memory: 512Mi
+        devices:
+          disks:
+          - name: containerdisk
+            disk:
+              bus: virtio
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+          interfaces:
+          - name: primary-udn-net
+            binding:
+              name: l2bridge
+      networks:
+      - name: primary-udn-net
+        pod: {}
+      volumes:
+      - name: containerdisk
+        containerDisk:
+          image: {{.vmImage}}
+          imagePullPolicy: IfNotPresent
+      - name: cloudinitdisk
+        cloudInitNoCloud:
+          userData: |-
+            #cloud-config
+            user: fedora
+            password: perfscale
+            chpasswd: { expire: False }

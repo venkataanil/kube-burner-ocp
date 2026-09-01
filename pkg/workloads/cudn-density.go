@@ -20,25 +20,29 @@ import (
 	"os"
 	"time"
 
+	"github.com/cloud-bulldozer/go-commons/v2/ssh"
 	"github.com/kube-burner/kube-burner/v2/pkg/config"
 	kubeburnermeasurements "github.com/kube-burner/kube-burner/v2/pkg/measurements"
 	"github.com/kube-burner/kube-burner/v2/pkg/workloads"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kube-burner/kube-burner-ocp/pkg/measurements"
+)
+
+const (
+	cudnDensitySSHKeyFileName = "ssh"
+	cudnDensityTmpDirPattern  = "kube-burner-cudn-density-*"
 )
 
 var cudnMeasurementFactoryMap = map[string]kubeburnermeasurements.NewMeasurementFactory{
 	"cudnLatency": measurements.NewCudnLatencyMeasurementFactory,
 }
 
-// getNodeGatewayMap builds a JSON mapping of nodeInternalIP -> gatewayIP by reading
-// the k8s.ovn.org/l3-gateway-config annotation from all worker nodes.
-// Returns e.g. {"10.0.1.5":"192.168.1.1","10.0.2.6":"192.168.2.1"}
-func getNodeGatewayMap() string {
+// getDefaultGatewayIP reads the cluster's default gateway IP from the
+// k8s.ovn.org/l3-gateway-config annotation on a worker node.
+func getDefaultGatewayIP() string {
 	kubeClientProvider := config.NewKubeClientProvider("", "")
 	clientSet, _ := kubeClientProvider.ClientSet(0, 0)
 	nodes, err := clientSet.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
@@ -47,9 +51,6 @@ func getNodeGatewayMap() string {
 	if err != nil {
 		log.Fatalf("Error listing worker nodes: %v", err)
 	}
-
-	gwMap := make(map[string]string)
-
 	for _, node := range nodes.Items {
 		gwConfig, exists := node.Annotations["k8s.ovn.org/l3-gateway-config"]
 		if !exists {
@@ -68,42 +69,19 @@ func getNodeGatewayMap() string {
 		if !ok || nextHop == "" {
 			continue
 		}
-
-		var nodeIP string
-		for _, addr := range node.Status.Addresses {
-			if addr.Type == corev1.NodeInternalIP {
-				nodeIP = addr.Address
-				break
-			}
-		}
-		if nodeIP == "" {
-			log.Warnf("Node %s has no InternalIP address, skipping", node.Name)
-			continue
-		}
-
-		log.Debugf("Node %s (IP: %s) -> gateway: %s", node.Name, nodeIP, nextHop)
-		gwMap[nodeIP] = nextHop
+		log.Infof("Detected cluster default gateway IP: %s (from node %s)", nextHop, node.Name)
+		return nextHop
 	}
-
-	if len(gwMap) == 0 {
-		log.Fatal("Unable to detect gateway IPs: no worker node has the k8s.ovn.org/l3-gateway-config annotation with a valid next-hop")
-	}
-
-	jsonBytes, err := json.Marshal(gwMap)
-	if err != nil {
-		log.Fatalf("Error marshaling gateway map to JSON: %v", err)
-	}
-	return string(jsonBytes)
+	log.Fatal("Unable to detect default gateway IP: no worker node has the k8s.ovn.org/l3-gateway-config annotation with a valid next-hop")
+	return ""
 }
 
 // NewCudnDensity holds cudn-density workload
 func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
-	var churnPercent, churnCycles, iterations, namespacesPerCudn, cudnsPerRA, incrementalStepSize int
-	var incrementalExpBase float64
-	var deletionStrategy string
-	var l3, pprof, gatewayCheck, bgp, ocpbugs85627Workaround bool
-	var churnDelay, churnDuration, podReadyThreshold, pprofInterval, jobPause, incrementalStepDelay time.Duration
-	var churnMode, incrementalPattern string
+	var churnPercent, churnCycles, iterations, namespacesPerCudn int
+	var l3, pprof, gatewayCheck, bgp, virt, sshCheck bool
+	var churnDelay, churnDuration, podReadyThreshold, pprofInterval, jobPause time.Duration
+	var churnMode, vmImage, sshKeyPairPath string
 	var metricsProfiles []string
 	var rc int
 	cmd := &cobra.Command{
@@ -111,40 +89,11 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 		Short:        "Runs cudn-density workload with tiered cross-namespace communication",
 		SilenceUsage: true,
 		PreRun: func(cmd *cobra.Command, args []string) {
-			if namespacesPerCudn < 1 {
-				log.Fatal("--namespaces-per-cudn must be >= 1")
-			}
-			if cudnsPerRA < 1 {
-				log.Fatal("--cudns-per-ra must be >= 1")
-			}
-			if cudnsPerRA > 1 && namespacesPerCudn > 1 {
-				log.Fatal("kube-burner doesn't support different values for repeatEveryNIterations. So set --namespaces-per-cudn=1 if --cudns-per-ra >= 1")
-			}
 			if iterations%namespacesPerCudn != 0 {
 				log.Fatalf("iterations (%d) must be divisible by namespaces-per-cudn (%d)", iterations, namespacesPerCudn)
 			}
-			if churnMode != string(config.ChurnObjects) && churnMode != string(config.ChurnNamespaces) {
-				log.Fatalf("--churn-mode must be 'objects' or 'namespaces', got '%s'", churnMode)
-			}
-			if incrementalStepSize < 0 {
-				log.Fatal("--incremental-step-size must be >= 0")
-			}
-			if incrementalStepSize > 0 {
-				if incrementalStepSize > iterations {
-					log.Fatalf("incremental-step-size (%d) must be <= iterations (%d)", incrementalStepSize, iterations)
-				}
-				if incrementalPattern != "linear" && incrementalPattern != "exponential" {
-					log.Fatalf("incremental-pattern must be 'linear' or 'exponential', got '%s'", incrementalPattern)
-				}
-				if incrementalStepSize%namespacesPerCudn != 0 {
-					log.Fatalf("incremental-step-size (%d) must be divisible by namespaces-per-cudn (%d)", incrementalStepSize, namespacesPerCudn)
-				}
-				if incrementalPattern == "exponential" && incrementalExpBase <= 1.0 {
-					log.Fatalf("incremental-exp-base must be > 1.0, got %f", incrementalExpBase)
-				}
-				if churnDuration > 0 || churnCycles > 0 {
-					log.Fatal("incremental load and churn cannot be used together")
-				}
+			if churnMode == string(config.ChurnNamespaces) && (churnDuration > 0 || churnCycles > 0) {
+				log.Fatal("churn-mode=namespaces is not supported for cudn-density: CUDN finalizers block namespace deletion. Use --churn-mode=objects instead")
 			}
 		},
 		Run: func(cmd *cobra.Command, args []string) {
@@ -155,12 +104,18 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 				log.Info("Layer 2 topology enabled")
 			}
 			if churnDuration > 0 || churnCycles > 0 {
-				log.Infof("Churn is enabled (mode: %s)", churnMode)
+				log.Info("Churn is enabled")
 			}
-			if incrementalStepSize > 0 {
-				log.Infof("Incremental load enabled: pattern %s, step size %d namespaces (%d CUDNs), delay %v",
-					incrementalPattern, incrementalStepSize, incrementalStepSize/namespacesPerCudn, incrementalStepDelay)
-			}
+                        var privateKeyPath, publicKeyPath string
+                        if virt && sshCheck {
+                                var err error
+                                privateKeyPath, publicKeyPath, err = ssh.GenerateSSHKeyPair(sshKeyPairPath, cudnDensityTmpDirPattern, cudnDensitySSHKeyFileName)
+                                if err != nil {
+                                        log.Fatalf("Failed to generate SSH keys for the test - %v", err)
+                                }
+                                AdditionalVars["privateKey"] = privateKeyPath
+                                AdditionalVars["publicKey"] = publicKeyPath
+                        }
 
 			AdditionalVars["PPROF"] = pprof
 			AdditionalVars["PPROF_INTERVAL"] = pprofInterval.String()
@@ -172,19 +127,16 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 			AdditionalVars["CHURN_MODE"] = churnMode
 			AdditionalVars["JOB_ITERATIONS"] = iterations
 			AdditionalVars["NAMESPACES_PER_CUDN"] = namespacesPerCudn
-			AdditionalVars["CUDNS_PER_RA"] = cudnsPerRA
 			AdditionalVars["POD_READY_THRESHOLD"] = podReadyThreshold
 			AdditionalVars["ENABLE_LAYER_3"] = l3
-			AdditionalVars["INCREMENTAL_STEP_SIZE"] = incrementalStepSize
-			AdditionalVars["INCREMENTAL_STEP_DELAY"] = incrementalStepDelay
-			AdditionalVars["INCREMENTAL_PATTERN"] = incrementalPattern
-			AdditionalVars["INCREMENTAL_EXP_BASE"] = incrementalExpBase
 			AdditionalVars["GATEWAY_CHECK"] = gatewayCheck
 			AdditionalVars["BGP"] = bgp
-			AdditionalVars["OCPBUGS_85627_WORKAROUND"] = ocpbugs85627Workaround
-			AdditionalVars["DELETION_STRATEGY"] = deletionStrategy
+			AdditionalVars["VIRT"] = virt
+			AdditionalVars["VM_IMAGE"] = vmImage
+			AdditionalVars["SSH_CHECK"] = sshCheck
 			if gatewayCheck {
-				AdditionalVars["NODE_GW_MAP"] = getNodeGatewayMap()
+				gatewayIP := getDefaultGatewayIP()
+				AdditionalVars["GATEWAY_IP"] = gatewayIP
 			}
 			wh.SetMeasurements(cudnMeasurementFactoryMap)
 			rc = RunWorkload(cmd, wh, cmd.Name()+".yml")
@@ -194,7 +146,7 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&l3, "layer3", false, "Use Layer3 topology instead of Layer2")
-	cmd.Flags().BoolVar(&bgp, "bgp", false, "Enable BGP route advertisement for each CUDN (requires external FRR on the default gatewaynode)")
+	cmd.Flags().BoolVar(&bgp, "bgp", false, "Enable BGP")
 	cmd.Flags().BoolVar(&pprof, "pprof", false, "Enable pprof collection for ovnkube components")
 	cmd.Flags().DurationVar(&pprofInterval, "pprof-interval", 0, "Interval between pprof collections")
 	cmd.Flags().DurationVar(&jobPause, "job-pause", 1*time.Minute, "Pause after CUDN creation to allow OVN-K network settling before workload deployment")
@@ -202,19 +154,16 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 	cmd.Flags().DurationVar(&churnDuration, "churn-duration", 0, "Churn duration")
 	cmd.Flags().DurationVar(&churnDelay, "churn-delay", 2*time.Minute, "Time to wait between each churn")
 	cmd.Flags().IntVar(&churnPercent, "churn-percent", 10, "Percentage of job iterations that kube-burner will churn each round")
-	cmd.Flags().StringVar(&churnMode, "churn-mode", string(config.ChurnObjects), "Churn mode: 'objects' churns deployments, 'namespaces' churns entire CUDN groups (CUDN + namespaces + pods)")
+	cmd.Flags().StringVar(&churnMode, "churn-mode", string(config.ChurnObjects), "Churn mode: objects (namespaces mode is not supported due to CUDN finalizer constraints)")
 	cmd.Flags().IntVar(&iterations, "iterations", 0, "Total number of namespaces to create")
 	cmd.Flags().IntVar(&namespacesPerCudn, "namespaces-per-cudn", 5, "Number of namespaces sharing the same CUDN")
-	cmd.Flags().IntVar(&cudnsPerRA, "cudns-per-ra", 1, "How many CUDNs an RA exports")
 	cmd.Flags().DurationVar(&podReadyThreshold, "pod-ready-threshold", 0, "Pod ready timeout threshold")
-	cmd.Flags().IntVar(&incrementalStepSize, "incremental-step-size", 0, "Namespaces to add per incremental step (0=disabled). Must be divisible by namespaces-per-cudn")
-	cmd.Flags().DurationVar(&incrementalStepDelay, "incremental-step-delay", 5*time.Minute, "Delay between incremental load steps")
-	cmd.Flags().StringVar(&incrementalPattern, "incremental-pattern", "linear", "Incremental load pattern: linear or exponential")
-	cmd.Flags().Float64Var(&incrementalExpBase, "incremental-exp-base", 2.0, "Base for exponential incremental pattern (must be > 1.0)")
 	cmd.Flags().BoolVar(&gatewayCheck, "gateway-check", false, "Enable default gateway reachability check from each namespace")
-	cmd.Flags().BoolVar(&ocpbugs85627Workaround, "static-mac-binding-workaround", false, "Deploy OCPBUGS-85627 static MAC binding workaround DaemonSet before creating CUDNs")
-	cmd.Flags().StringVar(&deletionStrategy, "deletion-strategy", config.DefaultDeletionStrategy, "GC deletion mode, default deletes entire namespaces and gvr deletes objects within namespaces before deleting the parent namespace")
 	cmd.Flags().StringSliceVar(&metricsProfiles, "metrics-profile", []string{"metrics.yml"}, "Comma separated list of metrics profiles to use")
+        cmd.Flags().BoolVar(&virt, "virt", false, "Deploy VMs instead of pods")
+        cmd.Flags().StringVar(&vmImage, "vm-image", "quay.io/openshift-cnv/qe-cnv-tests-fedora:40", "VM image to deploy (only used with --virt)")
+	cmd.Flags().BoolVar(&sshCheck, "ssh-check", false, "Enable SSH key injection for VMs (only used with --virt)")
+	cmd.Flags().StringVar(&sshKeyPairPath, "ssh-key-path", "", "Path to save the generated SSH keys (only used with --virt --ssh-check)")
 	cmd.MarkFlagRequired("iterations")
 	return cmd
 }

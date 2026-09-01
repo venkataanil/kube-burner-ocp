@@ -1,20 +1,9 @@
-# CUDN CIDR allocation uses RFC1918 range 10.132.0.0 - 10.255.255.255, avoiding:
-#   - AWS VPC (10.0.0.0/16), OCP pod network (10.128.0.0/14)
-#   - OVN-K internals (100.64.0.0/16 join, 100.88.0.0/16 transit)
-#
-# Adjust CIDR prefix, perBlock, and hostSubnet to match your cluster size and CUDN count:
-#
-#   CIDR prefix | perBlock | hostSubnet | Max nodes | Pods/node | Max CUDNs
-#   /16         | 1        | /26        | 1024      | 62        | 124
-#   /17         | 2        | /26        | 512       | 62        | 248
-#   /18         | 4        | /26        | 256       | 62        | 496
-#   /19         | 8        | /26        | 128       | 62        | 992
 apiVersion: k8s.ovn.org/v1
 kind: ClusterUserDefinedNetwork
 metadata:
   name: cudn-{{.Iteration}}
   labels:
-    ra-{{ div .Iteration (int .cudns_per_ra) }}: ""
+    ra-{{ div .Iteration (int .cudn_per_ra) }}: ""
 spec:
   {{- $nsList := list }}
   {{- $nsStart := mul $.Iteration $.namespaces_per_cudn }}
@@ -29,14 +18,13 @@ spec:
     - key: kubernetes.io/metadata.name
       operator: In
       values: {{$nsNames}}
-  {{- $perBlock := 8 }}
-  {{- $secondOctet := add 132 (div $.Iteration $perBlock) }}
-  {{- $thirdOctet := mul (mod $.Iteration $perBlock) 32 }}
-  {{- $cudnCidr := printf "10.%d.%d.0/19" $secondOctet $thirdOctet }}
+  {{- $firstOctet := add (div $.Iteration 256) 40 }}
+  {{- $secondOctet := mod $.Iteration 256 }}
+  {{- $cudnCidr := print $firstOctet "." $secondOctet ".0.0/16" }}
   network:
     topology: Layer3
     layer3:
       role: Primary
       subnets:
         - cidr: {{$cudnCidr}}
-          hostSubnet: 26
+          hostSubnet: 24
