@@ -18,6 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/cloud-bulldozer/go-commons/v2/ssh"
@@ -38,6 +40,44 @@ var cudnMeasurementFactoryMap = map[string]kubeburnermeasurements.NewMeasurement
 	"cudnLatency": measurements.NewCudnLatencyMeasurementFactory,
 	"sshCheck":    measurements.NewSSHCheckMeasurementFactory,
 	"sshLoadTest": measurements.NewSSHLoadTestMeasurementFactory,
+}
+
+// getWorkerNodeIPs returns InternalIP addresses of all worker nodes, sorted by
+// node name for deterministic round-robin assignment across job iterations.
+func getWorkerNodeIPs() []string {
+	kubeClientProvider := config.NewKubeClientProvider("", "")
+	clientSet, _ := kubeClientProvider.ClientSet(0, 0)
+	nodes, err := clientSet.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
+		LabelSelector: "node-role.kubernetes.io/worker",
+	})
+	if err != nil {
+		log.Fatalf("Error listing worker nodes: %v", err)
+	}
+
+	sort.Slice(nodes.Items, func(i, j int) bool {
+		return nodes.Items[i].Name < nodes.Items[j].Name
+	})
+
+	var ips []string
+	for _, node := range nodes.Items {
+		var nodeIP string
+		for _, addr := range node.Status.Addresses {
+			if addr.Type == corev1.NodeInternalIP {
+				nodeIP = addr.Address
+				break
+			}
+		}
+		if nodeIP == "" {
+			log.Warnf("Node %s has no InternalIP address, skipping", node.Name)
+			continue
+		}
+		log.Infof("Worker node %s -> InternalIP %s", node.Name, nodeIP)
+		ips = append(ips, nodeIP)
+	}
+	if len(ips) == 0 {
+		log.Fatal("No worker nodes with InternalIP addresses found")
+	}
+	return ips
 }
 
 // getNodeGatewayMap builds a JSON mapping of nodeInternalIP -> gatewayIP by reading
@@ -209,6 +249,10 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 			AdditionalVars["SSH_LOAD_TEST"] = sshLoadTest
 			AdditionalVars["SSH_LOAD_TEST_DURATION"] = sshLoadTestDuration.String()
 			AdditionalVars["SSH_LOAD_TEST_DURATION_SECS"] = int(sshLoadTestDuration.Seconds())
+			workerNodeIPs := getWorkerNodeIPs()
+			AdditionalVars["WORKER_NODE_IPS"] = strings.Join(workerNodeIPs, " ")
+			AdditionalVars["WORKER_NODE_COUNT"] = len(workerNodeIPs)
+			log.Infof("Passing %d worker node IPs for NodePort host round-robin: %v", len(workerNodeIPs), workerNodeIPs)
 			if gatewayCheck {
 				AdditionalVars["NODE_GW_MAP"] = getNodeGatewayMap()
 			}

@@ -32,6 +32,8 @@ spec:
                 operator: DoesNotExist
               - key: node-role.kubernetes.io/workload
                 operator: DoesNotExist
+      nodeSelector:
+        kubernetes.io/hostname: ip-10-0-0-176.us-west-2.compute.internal
       containers:
       - image: {{ if .bgp }}quay.io/cloud-bulldozer/nginx-ssh:latest{{ else }}quay.io/cloud-bulldozer/nginx:latest{{ end }}
         resources:

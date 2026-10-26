@@ -1,4 +1,3 @@
----
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -14,104 +13,245 @@ spec:
         name: cudn-density-client-{{.Replica}}
         app: client
     spec:
-      dnsConfig:
-        options:
-          - name: ndots
-            value: "3"
-      topologySpreadConstraints:
-      - maxSkew: 1
-        topologyKey: kubernetes.io/hostname
-        whenUnsatisfiable: ScheduleAnyway
-        labelSelector:
-          matchLabels:
-            app: client
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: node-role.kubernetes.io/worker
-                operator: Exists
-              - key: node-role.kubernetes.io/infra
-                operator: DoesNotExist
-              - key: node-role.kubernetes.io/workload
-                operator: DoesNotExist
+      {{- $cycleSeconds := 50 }}
+      {{- $startIp := "10.0.1.10" }}
+      {{- $endIp := "10.0.1.34" }}
+      {{- $initStartIp := "10.0.1.10" }}
+      {{- $initEndIp := "10.0.1.34" }}
+      {{- /* Round-robin worker InternalIP: iteration N -> worker N % workerNodeCount */}}
+      {{- $nodePortHost := index (splitList " " .workerNodeIPs) (mod .Iteration .workerNodeCount) }}
+      {{- $nodePort := add 30080 .Iteration }}
+      nodeSelector:
+        kubernetes.io/hostname: ip-10-0-0-139.us-west-2.compute.internal
       containers:
       - name: client-app
-        image: quay.io/cloud-bulldozer/curl:latest
-        {{- $position := mod .Iteration .namespaces_per_cudn }}
-        {{- $cudnBase := mul (div .Iteration .namespaces_per_cudn) .namespaces_per_cudn }}
-        {{- $lastPosition := sub .namespaces_per_cudn 1 }}
-        {{- if .gatewayCheck }}
-        env:
-          - name: NODE_IP
-            valueFrom:
-              fieldRef:
-                fieldPath: status.hostIP
-        {{- end }}
-        {{ if lt $position $lastPosition }}
+        image: docker.io/nicolaka/netshoot:latest
         command:
-          - "/bin/sh"
-          - "-c"
-          - |
-            while true; do
-              curl --fail -sS http://cudn-svc.cudn-density-{{ $.Iteration }}.svc.cluster.local:8080 -o /dev/null 2>/dev/null && echo "OK->ns-{{ $.Iteration }}(local)" || echo "FAIL->ns-{{ $.Iteration }}(local)";
-              {{- range $offset := until (int $lastPosition) }}
-                {{- $peerOffset := add $offset 1 }}
-                {{- if lt (add $position $peerOffset) $.namespaces_per_cudn }}
-                  {{- $peerIter := add $cudnBase (add $position $peerOffset) }}
-              curl --fail -sS http://cudn-svc.cudn-density-{{ $peerIter }}.svc.cluster.local:8080 -o /dev/null 2>/dev/null && echo "OK->ns-{{ $peerIter }}" || echo "FAIL->ns-{{ $peerIter }}";
-                {{- end }}
-              {{- end }}
-              {{- if $.gatewayCheck }}
-              GW_JSON='{{ $.nodeGwMap }}'; GATEWAY="${GW_JSON#*\"${NODE_IP}\":\"}"; GATEWAY="${GATEWAY%%\"*}";
-              ping -c 1 -W 3 $GATEWAY >/dev/null 2>&1 && echo "OK->gateway($GATEWAY)" || echo "FAIL->gateway($GATEWAY)";
-              {{- end }}
-              sleep 10
-            done
-        {{ else }}
-        command:
-          - "/bin/sh"
-          - "-c"
-          - |
-            while true; do
-              curl --fail -sS http://cudn-svc.cudn-density-{{ $.Iteration }}.svc.cluster.local:8080 -o /dev/null 2>/dev/null && echo "OK->ns-{{ $.Iteration }}(local)" || echo "FAIL->ns-{{ $.Iteration }}(local)";
-              {{- if $.gatewayCheck }}
-              GW_JSON='{{ $.nodeGwMap }}'; GATEWAY="${GW_JSON#*\"${NODE_IP}\":\"}"; GATEWAY="${GATEWAY%%\"*}";
-              ping -c 1 -W 3 $GATEWAY >/dev/null 2>&1 && echo "OK->gateway($GATEWAY)" || echo "FAIL->gateway($GATEWAY)";
-              {{- end }}
-              sleep 10
-            done
-        {{ end }}
+        - "/bin/sh"
+        - "-c"
+        - |
+          FPING_INTERVAL_MS="${FPING_INTERVAL_MS:-150}"
+          FPING_TIMEOUT_MS="${FPING_TIMEOUT_MS:-1000}"
+          CYCLE_SECONDS="${CYCLE_SECONDS:-56}"
+          TARGETS_FILE="${TARGETS_FILE:-/tmp/fping-targets.txt}"
+          START_IP="${START_IP:-198.18.1.1}"
+          END_IP="${END_IP:-198.18.2.254}"
+          INIT_START_IP="${INIT_START_IP:-198.18.2.1}"
+          INIT_END_IP="${INIT_END_IP:-198.18.2.254}"
+          INIT_TARGET_IP="${INIT_TARGET_IP:-}"
+          INIT_INDEX="${INIT_INDEX:-1}"
+          INIT_PING_COUNT="${INIT_PING_COUNT:-1}"
+          INIT_PING_TIMEOUT_MS="${INIT_PING_TIMEOUT_MS:-1000}"
+          INIT_RETRIES="${INIT_RETRIES:-0}"
+          INIT_RETRY_SLEEP="${INIT_RETRY_SLEEP:-2}"
+          NODEPORT_URL="${NODEPORT_URL:-}"
+          NODEPORT_RETRIES="${NODEPORT_RETRIES:-0}"
+          NODEPORT_RETRY_SLEEP="${NODEPORT_RETRY_SLEEP:-2}"
+
+          if ! command -v fping >/dev/null 2>&1; then
+            echo "ERROR: fping not found in container image" >&2
+            exit 1
+          fi
+
+          echo fail > /tmp/ping-status
+
+          ip_to_int() {
+            local IFS=.
+            set -- $1
+            echo $(( ($1 << 24) + ($2 << 16) + ($3 << 8) + $4 ))
+          }
+
+          int_to_ip() {
+            local n=$1
+            printf '%d.%d.%d.%d\n' \
+              $(( (n >> 24) & 255 )) \
+              $(( (n >> 16) & 255 )) \
+              $(( (n >> 8) & 255 )) \
+              $(( n & 255 ))
+          }
+
+          check_nodeport() {
+            curl --fail -sS -o /dev/null --connect-timeout 2 --max-time 5 "$NODEPORT_URL"
+          }
+
+          # --- step 1: single-target reachability gate (external + NodePort) ---
+          if [ -z "$INIT_TARGET_IP" ]; then
+            start_int=$(ip_to_int "$INIT_START_IP")
+            end_int=$(ip_to_int "$INIT_END_IP")
+            if [ "$start_int" -gt "$end_int" ]; then
+              echo "ERROR: INIT_START_IP (${INIT_START_IP}) is after INIT_END_IP (${INIT_END_IP})" >&2
+              exit 1
+            fi
+            # ponytail: INIT_INDEX is kube-burner's {{"{{.Replica}}"}} (1-based) and is
+            # per-Deployment, so it only gives a unique target when podReplicas=1.
+            # Wraps around when the index exceeds the range size.
+            n=$(( start_int + (INIT_INDEX + 1) % (end_int - start_int + 1) ))
+            INIT_TARGET_IP=$(int_to_ip "$n")
+          fi
+          echo "step1: init-ping ${INIT_TARGET_IP}"
+          attempt=0
+          while true; do
+            attempt=$((attempt + 1))
+            if fping -c "$INIT_PING_COUNT" -t "$INIT_PING_TIMEOUT_MS" -q "$INIT_TARGET_IP"; then
+              echo "step1: ${INIT_TARGET_IP} reachable after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "$INIT_RETRIES" -ne 0 ] && [ "$attempt" -ge "$INIT_RETRIES" ]; then
+              echo "ERROR: ${INIT_TARGET_IP} unreachable after ${attempt} attempt(s)" >&2
+              exit 1
+            fi
+            sleep "$INIT_RETRY_SLEEP"
+          done
+
+          echo "step1: nodeport ${NODEPORT_URL}"
+          attempt=0
+          while true; do
+            attempt=$((attempt + 1))
+            if check_nodeport; then
+              echo "step1: nodeport ok after ${attempt} attempt(s)"
+              break
+            fi
+            if [ "$NODEPORT_RETRIES" -ne 0 ] && [ "$attempt" -ge "$NODEPORT_RETRIES" ]; then
+              echo "ERROR: nodeport ${NODEPORT_URL} unreachable after ${attempt} attempt(s)" >&2
+              exit 1
+            fi
+            sleep "$NODEPORT_RETRY_SLEEP"
+          done
+
+          # Ready signal for readinessProbe
+          echo ok > /tmp/ping-status
+
+          # --- build the sweep target list ---
+          start_int=$(ip_to_int "$START_IP")
+          end_int=$(ip_to_int "$END_IP")
+          if [ "$start_int" -gt "$end_int" ]; then
+            echo "ERROR: START_IP (${START_IP}) is after END_IP (${END_IP})" >&2
+            exit 1
+          fi
+
+          : > "$TARGETS_FILE"
+          n=$start_int
+          while [ "$n" -le "$end_int" ]; do
+            last_octet=$(( n & 255 ))
+            if [ "$last_octet" -ne 0 ] && [ "$last_octet" -ne 255 ]; then
+              int_to_ip "$n" >> "$TARGETS_FILE"
+            fi
+            n=$((n + 1))
+          done
+          TARGET_COUNT=$(wc -l < "$TARGETS_FILE")
+          if [ "$TARGET_COUNT" -eq 0 ]; then
+            echo "ERROR: no targets generated from ${START_IP} to ${END_IP}" >&2
+            exit 1
+          fi
+
+          MIN_SWEEP_SEC=$(( (TARGET_COUNT - 1) * FPING_INTERVAL_MS / 1000 ))
+          if [ "$MIN_SWEEP_SEC" -gt "$CYCLE_SECONDS" ]; then
+            echo "ERROR: ${TARGET_COUNT} targets at -i ${FPING_INTERVAL_MS}ms needs ~${MIN_SWEEP_SEC}s," \
+                 "but CYCLE_SECONDS=${CYCLE_SECONDS}. Reduce FPING_INTERVAL_MS or increase CYCLE_SECONDS." >&2
+            exit 1
+          fi
+
+          sweep() {
+            fping -C 1 -u -q \
+              -i "$FPING_INTERVAL_MS" -t "$FPING_TIMEOUT_MS" -r 0 \
+              -f "$1" 2>&1 \
+              | grep ' -$' \
+              | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+              || true
+          }
+
+          # --- step 2: warm-up sweep, retrying each failed IP forever ---
+          cp "$TARGETS_FILE" /tmp/fping-pending.txt
+          while true; do
+            failures=$(sweep /tmp/fping-pending.txt)
+            [ -z "$failures" ] && break
+            echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') warm-up retrying: $(echo "$failures" | xargs)"
+            echo "$failures" > /tmp/fping-pending.txt
+            sleep 1
+          done
+          echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') warm-up: all ${TARGET_COUNT} targets ok"
+
+          # --- step 3: steady-state cycle (50 externals + NodePort), any failure is fatal ---
+          while true; do
+            cycle_start=$(date +%s)
+            ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+            failures=$(sweep "$TARGETS_FILE")
+
+            if [ -n "$failures" ]; then
+              echo "$ts fping failures: $(echo "$failures" | xargs)" >&2
+              echo fail > /tmp/ping-status
+              exit 1
+            fi
+
+            if ! check_nodeport; then
+              echo "$ts nodeport failure: ${NODEPORT_URL}" >&2
+              echo fail > /tmp/ping-status
+              exit 1
+            fi
+
+            echo "$ts fping all ${TARGET_COUNT} targets ok; nodeport ok"
+            echo ok > /tmp/ping-status
+
+            now=$(date +%s)
+            wait=$((CYCLE_SECONDS - (now - cycle_start)))
+            [ "$wait" -gt 0 ] && sleep "$wait"
+          done
         resources:
           requests:
-            memory: "10Mi"
-            cpu: "10m"
+            memory: "2Mi"
+            cpu: "2m"
         imagePullPolicy: IfNotPresent
         securityContext:
-          privileged: false
-        {{- $nextPosition := mod (add $position 1) .namespaces_per_cudn }}
-        {{- $peerNs := add $cudnBase $nextPosition }}
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+            add:
+              - NET_RAW
         readinessProbe:
           exec:
             command:
             - "/bin/sh"
             - "-c"
-            - |-
-              curl --fail -sS http://cudn-svc.cudn-density-{{ $peerNs }}.svc.cluster.local:8080/ -o /dev/null{{ if .gatewayCheck }} && GW_JSON='{{ .nodeGwMap }}' && GATEWAY="${GW_JSON#*\"${NODE_IP}\":\"}" && GATEWAY="${GATEWAY%%\"*}" && ping -c 1 -W 3 $GATEWAY{{ end }}
-          periodSeconds: 1
+            - 'test "$(cat /tmp/ping-status 2>/dev/null)" = "ok"'
+          periodSeconds: 10
           timeoutSeconds: 5
-          failureThreshold: 60
-        volumeMounts:
-        - name: podinfo
-          mountPath: /etc/podlabels
-      volumes:
-      - name: podinfo
-        downwardAPI:
-          items:
-            - path: "labels"
-              fieldRef:
-                fieldPath: metadata.labels
+          failureThreshold: 1
+          initialDelaySeconds: 2
+        env:
+        - name: INIT_INDEX
+          value: "{{.Iteration}}"
+        - name: INIT_START_IP
+          value: "{{$initStartIp}}"
+        - name: INIT_END_IP
+          value: "{{$initEndIp}}"
+        - name: INIT_PING_COUNT
+          value: "1"
+        - name: INIT_PING_TIMEOUT_MS
+          value: "200"
+        - name: INIT_RETRIES
+          value: "0"
+        - name: INIT_RETRY_SLEEP
+          value: "2"
+        - name: FPING_INTERVAL_MS
+          value: "500"
+        - name: FPING_TIMEOUT_MS
+          value: "500"
+        - name: CYCLE_SECONDS
+          value: "{{$cycleSeconds}}"
+        - name: TARGETS_FILE
+          value: "/tmp/fping-targets.txt"
+        - name: START_IP
+          value: "{{$startIp}}"
+        - name: END_IP
+          value: "{{$endIp}}"
+        - name: NODEPORT_URL
+          value: "http://{{ $nodePortHost }}:{{ $nodePort }}/"
+        - name: NODEPORT_RETRIES
+          value: "0"
+        - name: NODEPORT_RETRY_SLEEP
+          value: "2"
       restartPolicy: Always
   strategy:
     type: RollingUpdate

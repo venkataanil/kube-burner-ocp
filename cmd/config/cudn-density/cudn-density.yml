@@ -93,7 +93,6 @@ jobs:
       pod-security.kubernetes.io/warn: privileged
       k8s.ovn.org/primary-user-defined-network: ""
     measurements:
-      - name: cudnLatency
       - name: podLatency
 {{ if ne .POD_READY_THRESHOLD 0 }}
         thresholds:
@@ -144,43 +143,21 @@ jobs:
           base: {{.INCREMENTAL_EXP_BASE}}
 {{ end }}
 {{ end }}
-    jobPause: {{.JOB_PAUSE}}
+    jobPause: 10m
     metricsClosing: afterJobPause
     cleanup: false
     objects:
-      {{ if .ENABLE_LAYER_3 }}
-      - objectTemplate: cudn-l3.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 1
-          pauseBeforeGC: {{.JOB_PAUSE}}
-        repeatEveryNIterations: {{.NAMESPACES_PER_CUDN}}
-        inputVars:
-          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-          total_namespaces: {{.JOB_ITERATIONS}}
-          cudns_per_ra: {{.CUDNS_PER_RA}}
-        waitOptions:
-          customStatusPaths:
-            - key: .conditions[] | select(.type=="NetworkAllocationSucceeded") | .status
-              value: "True"
-      {{ else }}
       - objectTemplate: cudn-l2.yml
         replicas: 1
         churn: false
         group:
           id: 1
-          pauseBeforeGC: {{.JOB_PAUSE}}
+          pauseBeforeGC: 10m
         repeatEveryNIterations: {{.NAMESPACES_PER_CUDN}}
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
           total_namespaces: {{.JOB_ITERATIONS}}
           cudns_per_ra: {{.CUDNS_PER_RA}}
-        waitOptions:
-          customStatusPaths:
-            - key: .conditions[] | select(.type=="NetworkAllocationSucceeded") | .status
-              value: "True"
-      {{ end }}
       {{ if .BGP }}
       - objectTemplate: ra.yml
         replicas: 1
@@ -207,13 +184,14 @@ jobs:
         group:
           id: 2
 
-      - objectTemplate: service.yml
+      - objectTemplate: scc-privileged-rolebinding.yml
         replicas: 1
         churn: false
         group:
           id: 2
 
-      - objectTemplate: service-headless.yml
+      # Scenario B: NodePort cudn-svc; no app tier / headless / app NPs
+      - objectTemplate: service.yml
         replicas: 1
         churn: false
         group:
@@ -249,30 +227,6 @@ jobs:
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
 
-      - objectTemplate: np-allow-app-ingress.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
-        inputVars:
-          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-
-      - objectTemplate: np-allow-app-egress.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
-        inputVars:
-          namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-
-      - objectTemplate: egressfirewall.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
-        inputVars:
-          nodeGwMap: '{{ if .GATEWAY_CHECK }}{{.NODE_GW_MAP}}{{ end }}'
-
       - objectTemplate: resourcequota.yml
         replicas: 1
         churn: false
@@ -300,16 +254,9 @@ jobs:
         group:
           id: 2
         inputVars:
-          podReplicas: 2
+          podReplicas: 1
           bgp: {{.BGP}}
           sshPublicKeySecretName: "{{ if .BGP }}{{ $sshPublicKeySecretName }}{{ end }}"
-
-      - objectTemplate: deployment-app.yml
-        replicas: 1
-        group:
-          id: 2
-        inputVars:
-          podReplicas: 1
 
       - objectTemplate: deployment-client.yml
         replicas: 1
@@ -318,8 +265,8 @@ jobs:
         inputVars:
           podReplicas: 1
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
-          gatewayCheck: {{.GATEWAY_CHECK}}
-          nodeGwMap: '{{ if .GATEWAY_CHECK }}{{.NODE_GW_MAP}}{{ end }}'
+          workerNodeIPs: "{{.WORKER_NODE_IPS}}"
+          workerNodeCount: {{.WORKER_NODE_COUNT}}
 
 {{ if .GC }}
   - name: cudn-density-cleanup-namespaces

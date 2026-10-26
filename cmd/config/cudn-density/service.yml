@@ -1,7 +1,8 @@
-# cudn-svc: Main ClusterIP service for nginx servers.
-# Selects all pods with app=nginx (both server-1 and server-2 = 6 endpoints).
-# Exposes ports 8080 (http) and 8443 (https).
-# This is the service targeted by client cross-namespace traffic and readiness probes.
+# Scenario B: NodePort service for east-west client -> server traffic.
+# Unique nodePort per iteration/namespace so services do not collide on the node:
+#   http  nodePort = 30080 + Iteration  (iter 0 -> 30080, iter 1 -> 30081, ...)
+#   https nodePort = 31080 + Iteration
+# Clients must curl the matching http port (see deployment-client.yml NODEPORT_URL).
 kind: Service
 apiVersion: v1
 metadata:
@@ -14,8 +15,10 @@ spec:
     protocol: TCP
     port: 8080
     targetPort: 8080
+    nodePort: {{ add 30080 .Iteration }}
   - name: https
     protocol: TCP
     port: 8443
     targetPort: 8443
-  type: ClusterIP
+    nodePort: {{ add 31080 .Iteration }}
+  type: NodePort
