@@ -265,14 +265,6 @@ jobs:
         inputVars:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
 
-      - objectTemplate: egressfirewall.yml
-        replicas: 1
-        churn: false
-        group:
-          id: 2
-        inputVars:
-          nodeGwMap: '{{ if .GATEWAY_CHECK }}{{.NODE_GW_MAP}}{{ end }}'
-
       - objectTemplate: resourcequota.yml
         replicas: 1
         churn: false
