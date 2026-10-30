@@ -33,9 +33,9 @@ spec:
               - key: node-role.kubernetes.io/workload
                 operator: DoesNotExist
       nodeSelector:
-        kubernetes.io/hostname: ip-10-0-0-176.us-west-2.compute.internal
+        kubernetes.io/hostname: ip-10-0-0-12.us-east-2.compute.internal
       containers:
-      - image: {{ if .bgp }}quay.io/cloud-bulldozer/nginx-ssh:latest{{ else }}quay.io/cloud-bulldozer/nginx:latest{{ end }}
+      - image: {{ if .bgp }}quay.io/cloud-bulldozer/nginx-ssh:latest{{ else }}quay.io/sninganu/nginx:latest{{ end }}
         resources:
           requests:
             memory: "10Mi"
