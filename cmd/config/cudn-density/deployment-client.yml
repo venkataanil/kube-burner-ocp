@@ -14,18 +14,18 @@ spec:
         app: client
     spec:
       {{- $cycleSeconds := 50 }}
-      {{- $startIp := "10.0.1.10" }}
-      {{- $endIp := "10.0.1.34" }}
-      {{- $initStartIp := "10.0.1.10" }}
-      {{- $initEndIp := "10.0.1.34" }}
+      {{- $startIp := "10.0.17.10" }}
+      {{- $endIp := "10.0.17.34" }}
+      {{- $initStartIp := "10.0.17.10" }}
+      {{- $initEndIp := "10.0.17.34" }}
       {{- /* Round-robin worker InternalIP: iteration N -> worker N % workerNodeCount */}}
       {{- $nodePortHost := index (splitList " " .workerNodeIPs) (mod .Iteration .workerNodeCount) }}
       {{- $nodePort := add 30080 .Iteration }}
       nodeSelector:
-        kubernetes.io/hostname: ip-10-0-0-139.us-west-2.compute.internal
+        kubernetes.io/hostname: ip-10-0-0-101.us-east-2.compute.internal
       containers:
       - name: client-app
-        image: docker.io/nicolaka/netshoot:latest
+        image: quay.io/sninganu/netshoot:latest
         command:
         - "/bin/sh"
         - "-c"
