@@ -302,7 +302,7 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 				if err != nil {
 					log.Fatalf("Failed to init AWS client: %v", err)
 				}
-				if err := infra.CreateInstance(context.Background(), clientNode.Name+"."+awsRegion+".compute.internal", awsInstanceType, awsMaxTargets); err != nil {
+				if err := infra.CreateInstance(context.Background(), clientNode.Name, awsInstanceType, awsMaxTargets); err != nil {
 					log.Fatalf("Failed to create external target instance: %v", err)
 				}
 				defer infra.Destroy(context.Background())
