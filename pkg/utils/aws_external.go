@@ -44,9 +44,13 @@ type ExternalTargetInfra struct {
 	client     *ec2.Client
 }
 
-// NewExternalTargetInfra creates an AWS EC2 client for the given region
+// NewExternalTargetInfra creates an AWS EC2 client. If region is empty, uses AWS SDK default (env/config).
 func NewExternalTargetInfra(region string) (*ExternalTargetInfra, error) {
-	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), awsconfig.WithRegion(region))
+	var opts []func(*awsconfig.LoadOptions) error
+	if region != "" {
+		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(context.Background(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
