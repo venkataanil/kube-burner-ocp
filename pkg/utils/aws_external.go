@@ -215,7 +215,7 @@ echo "IPVLAN_SETUP_COMPLETE" > /tmp/ipvlan-done
 	return nil
 }
 
-// Destroy terminates the external instance
+// Destroy terminates the external instance and waits for full termination
 func (e *ExternalTargetInfra) Destroy(ctx context.Context) {
 	if e.InstanceID != "" {
 		log.Infof("Terminating external instance %s", e.InstanceID)
@@ -223,14 +223,17 @@ func (e *ExternalTargetInfra) Destroy(ctx context.Context) {
 			InstanceIds: []string{e.InstanceID},
 		}); err != nil {
 			log.Errorf("Failed to terminate instance %s: %v", e.InstanceID, err)
+			return
 		}
-	}
-	if e.KeyName != "" {
-		log.Infof("Deleting key pair %s", e.KeyName)
-		if _, err := e.client.DeleteKeyPair(ctx, &ec2.DeleteKeyPairInput{
-			KeyName: aws.String(e.KeyName),
-		}); err != nil {
-			log.Errorf("Failed to delete key pair %s: %v", e.KeyName, err)
+		// Wait for full termination so VPC cleanup can proceed
+		log.Infof("Waiting for instance %s to terminate...", e.InstanceID)
+		waiter := ec2.NewInstanceTerminatedWaiter(e.client)
+		if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{
+			InstanceIds: []string{e.InstanceID},
+		}, 5*time.Minute); err != nil {
+			log.Errorf("Instance %s did not terminate in time: %v", e.InstanceID, err)
+		} else {
+			log.Infof("Instance %s terminated", e.InstanceID)
 		}
 	}
 }

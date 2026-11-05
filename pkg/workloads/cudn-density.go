@@ -181,7 +181,7 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 	var deletionStrategy string
 	var l3, pprof, gatewayCheck, bgp, ocpbugs85627Workaround, sshLatencyCheck, sshLoadTest, externalAWSInfra bool
 	var churnDelay, churnDuration, podReadyThreshold, pprofInterval, jobPause, incrementalStepDelay, sshLoadTestDuration time.Duration
-	var churnMode, incrementalPattern, externalHost, awsRegion, awsInstanceType string
+	var churnMode, incrementalPattern, externalHost, awsRegion, awsInstanceType, awsInstanceIDFile string
 	var awsMaxTargets int
 	var metricsProfiles []string
 	var rc int
@@ -305,6 +305,14 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 				if err := infra.CreateInstance(context.Background(), clientNode.Name, awsInstanceType, awsMaxTargets); err != nil {
 					log.Fatalf("Failed to create external target instance: %v", err)
 				}
+				// Write instance ID to file for teardown step (defer may not run if container killed)
+				if awsInstanceIDFile != "" {
+					if err := os.WriteFile(awsInstanceIDFile, []byte(infra.InstanceID), 0644); err != nil {
+						log.Warnf("Failed to write instance ID to %s: %v", awsInstanceIDFile, err)
+					} else {
+						log.Infof("Instance ID %s written to %s", infra.InstanceID, awsInstanceIDFile)
+					}
+				}
 				defer infra.Destroy(context.Background())
 
 				AdditionalVars["EXTERNAL_START_IP"] = infra.StartIP
@@ -349,6 +357,7 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 	cmd.Flags().StringVar(&awsRegion, "aws-region", "us-east-2", "AWS region for external target instance (used with --external-aws-infra)")
 	cmd.Flags().StringVar(&awsInstanceType, "aws-instance-type", "m5.4xlarge", "EC2 instance type for external target (used with --external-aws-infra)")
 	cmd.Flags().IntVar(&awsMaxTargets, "aws-max-targets", 25, "Number of ipvlan target IPs to create on external instance (used with --external-aws-infra)")
+	cmd.Flags().StringVar(&awsInstanceIDFile, "aws-instance-id-file", "", "File path to write external EC2 instance ID for teardown (used with --external-aws-infra)")
 	cmd.MarkFlagRequired("iterations")
 	return cmd
 }
