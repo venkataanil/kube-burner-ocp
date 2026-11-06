@@ -242,6 +242,12 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 					incrementalPattern, incrementalStepSize, incrementalStepSize/namespacesPerCudn, incrementalStepDelay)
 			}
 
+			// Set defaults for external-aws-infra template vars (overridden when --external-aws-infra=true)
+			AdditionalVars["CLIENT_NODE_HOSTNAME"] = ""
+			AdditionalVars["SERVER_NODE_HOSTNAME"] = ""
+			AdditionalVars["EXTERNAL_START_IP"] = ""
+			AdditionalVars["EXTERNAL_END_IP"] = ""
+
 			AdditionalVars["PPROF"] = pprof
 			AdditionalVars["PPROF_INTERVAL"] = pprofInterval.String()
 			AdditionalVars["JOB_PAUSE"] = jobPause

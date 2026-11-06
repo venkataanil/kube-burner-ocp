@@ -32,8 +32,10 @@ spec:
                 operator: DoesNotExist
               - key: node-role.kubernetes.io/workload
                 operator: DoesNotExist
+      {{- if .SERVER_NODE_HOSTNAME}}
       nodeSelector:
         kubernetes.io/hostname: "{{.SERVER_NODE_HOSTNAME}}"
+      {{- end}}
       containers:
       - image: {{ if .bgp }}quay.io/cloud-bulldozer/nginx-ssh:latest{{ else }}quay.io/sninganu/nginx:latest{{ end }}
         resources:

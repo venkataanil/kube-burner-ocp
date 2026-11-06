@@ -257,6 +257,7 @@ jobs:
           podReplicas: 1
           bgp: {{.BGP}}
           sshPublicKeySecretName: "{{ if .BGP }}{{ $sshPublicKeySecretName }}{{ end }}"
+          SERVER_NODE_HOSTNAME: "{{.SERVER_NODE_HOSTNAME}}"
 
       - objectTemplate: deployment-client.yml
         replicas: 1
@@ -267,6 +268,9 @@ jobs:
           namespaces_per_cudn: {{.NAMESPACES_PER_CUDN}}
           workerNodeIPs: "{{.WORKER_NODE_IPS}}"
           workerNodeCount: {{.WORKER_NODE_COUNT}}
+          CLIENT_NODE_HOSTNAME: "{{.CLIENT_NODE_HOSTNAME}}"
+          EXTERNAL_START_IP: "{{.EXTERNAL_START_IP}}"
+          EXTERNAL_END_IP: "{{.EXTERNAL_END_IP}}"
 
 {{ if .GC }}
   - name: cudn-density-cleanup-namespaces

@@ -21,8 +21,11 @@ spec:
       {{- /* Round-robin worker InternalIP: iteration N -> worker N % workerNodeCount */}}
       {{- $nodePortHost := index (splitList " " .workerNodeIPs) (mod .Iteration .workerNodeCount) }}
       {{- $nodePort := add 30080 .Iteration }}
+      {{- if .CLIENT_NODE_HOSTNAME}}
       nodeSelector:
         kubernetes.io/hostname: "{{.CLIENT_NODE_HOSTNAME}}"
+      {{- end}}
+
       containers:
       - name: client-app
         image: quay.io/sninganu/netshoot:latest
