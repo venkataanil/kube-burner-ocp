@@ -227,13 +227,13 @@ spec:
         - name: INIT_END_IP
           value: "{{$initEndIp}}"
         - name: INIT_PING_COUNT
-          value: "3"
+          value: "1"
         - name: INIT_PING_TIMEOUT_MS
-          value: "2000"
+          value: "200"
         - name: INIT_RETRIES
           value: "0"
         - name: INIT_RETRY_SLEEP
-          value: "5"
+          value: "2"
         - name: FPING_INTERVAL_MS
           value: "500"
         - name: FPING_TIMEOUT_MS
