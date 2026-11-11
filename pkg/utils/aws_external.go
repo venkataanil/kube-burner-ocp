@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -34,13 +35,14 @@ import (
 
 // ExternalTargetInfra holds state for the external EC2 target instance
 type ExternalTargetInfra struct {
-	InstanceID string
-	KeyName    string
-	PrivateIP  string
-	StartIP    string
-	EndIP      string
-	Region     string
-	client     *ec2.Client
+	InstanceID     string
+	KeyName        string
+	PrivateIP      string
+	StartIP        string
+	EndIP          string
+	Region         string
+	InstanceIDFile string // path to write instance ID for teardown
+	client         *ec2.Client
 }
 
 // NewExternalTargetInfra creates an AWS EC2 client. Region auto-detected from SDK defaults.
@@ -100,6 +102,13 @@ func (e *ExternalTargetInfra) CreateInstance(ctx context.Context, workerNodeDNS,
 	}
 	if sgID == "" && len(worker.SecurityGroups) > 0 {
 		sgID = aws.ToString(worker.SecurityGroups[0].GroupId)
+	}
+	// Use Amazon Linux 2023 AMI — supports bash user-data and ec2-user (RHCOS uses Ignition, not cloud-init)
+	al2023AMI, err := e.getAL2023AMI(ctx)
+	if err != nil {
+		log.Warnf("Could not find AL2023 AMI, falling back to worker AMI %s: %v", amiID, err)
+	} else {
+		amiID = al2023AMI
 	}
 	log.Infof("VPC=%s Subnet=%s SG=%s AZ=%s AMI=%s", vpcID, subnetID, sgID, az, amiID)
 
@@ -179,6 +188,13 @@ echo "IPVLAN_SETUP_COMPLETE" > /tmp/ipvlan-done
 	}
 	e.InstanceID = aws.ToString(runOut.Instances[0].InstanceId)
 	log.Infof("Launched instance %s, waiting for running state...", e.InstanceID)
+	// B4: Write instance ID immediately after launch (before post-launch steps that could fail)
+	// so teardown can clean up even if setup fails mid-way
+	if e.InstanceIDFile != "" {
+		if werr := os.WriteFile(e.InstanceIDFile, []byte(e.InstanceID), 0644); werr != nil {
+			log.Warnf("Failed to write instance ID to %s: %v", e.InstanceIDFile, werr)
+		}
+	}
 
 	waiter := ec2.NewInstanceRunningWaiter(e.client)
 	if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{
@@ -236,6 +252,30 @@ func (e *ExternalTargetInfra) Destroy(ctx context.Context) {
 			log.Infof("Instance %s terminated", e.InstanceID)
 		}
 	}
+}
+
+// getAL2023AMI returns the latest Amazon Linux 2023 x86_64 AMI ID.
+// AL2023 supports bash user-data via cloud-init; RHCOS uses Ignition and ignores bash scripts.
+func (e *ExternalTargetInfra) getAL2023AMI(ctx context.Context) (string, error) {
+	out, err := e.client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+		Owners: []string{"amazon"},
+		Filters: []ec2types.Filter{
+			{Name: aws.String("name"), Values: []string{"al2023-ami-2023*-x86_64"}},
+			{Name: aws.String("state"), Values: []string{"available"}},
+		},
+	})
+	if err != nil || len(out.Images) == 0 {
+		return "", fmt.Errorf("no AL2023 AMI found: %w", err)
+	}
+	// Sort by creation date descending, return latest
+	latest := out.Images[0]
+	for _, img := range out.Images[1:] {
+		if aws.ToString(img.CreationDate) > aws.ToString(latest.CreationDate) {
+			latest = img
+		}
+	}
+	log.Infof("Using Amazon Linux 2023 AMI: %s (%s)", aws.ToString(latest.ImageId), aws.ToString(latest.Name))
+	return aws.ToString(latest.ImageId), nil
 }
 
 // findFreeIPs finds 'count' consecutive unused IPs in the given subnet

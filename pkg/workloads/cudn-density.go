@@ -305,6 +305,9 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 				AdditionalVars["SERVER_NODE_HOSTNAME"] = serverNode.Name
 
 				infra, err := utils.NewExternalTargetInfra(awsRegion)
+				if err == nil {
+					infra.InstanceIDFile = awsInstanceIDFile
+				}
 				if err != nil {
 					log.Fatalf("Failed to init AWS client: %v", err)
 				}
