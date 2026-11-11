@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kube-burner/kube-burner-ocp/pkg/measurements"
+	"github.com/kube-burner/kube-burner-ocp/pkg/utils"
 )
 
 const cudnDensitySSHKeyTmpDirPattern = "kube-burner-cudn-density-ssh"
@@ -157,14 +158,31 @@ func validateSSHFlags(bgp, sshLatencyCheck, sshLoadTest bool, sshLoadTestDuratio
 	}
 }
 
+// getWorkerNodesSorted returns worker nodes sorted by name for deterministic selection
+func getWorkerNodesSorted() ([]corev1.Node, error) {
+	kubeClientProvider := config.NewKubeClientProvider("", "")
+	clientSet, _ := kubeClientProvider.ClientSet(0, 0)
+	nodes, err := clientSet.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
+		LabelSelector: "node-role.kubernetes.io/worker",
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(nodes.Items, func(i, j int) bool {
+		return nodes.Items[i].Name < nodes.Items[j].Name
+	})
+	return nodes.Items, nil
+}
+
 // NewCudnDensity holds cudn-density workload
 func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 	var churnPercent, churnCycles, iterations, namespacesPerCudn, cudnsPerRA, incrementalStepSize int
 	var incrementalExpBase float64
 	var deletionStrategy string
-	var l3, pprof, gatewayCheck, bgp, ocpbugs85627Workaround, sshLatencyCheck, sshLoadTest bool
+	var l3, pprof, gatewayCheck, bgp, ocpbugs85627Workaround, sshLatencyCheck, sshLoadTest, externalAWSInfra bool
 	var churnDelay, churnDuration, podReadyThreshold, pprofInterval, jobPause, incrementalStepDelay, sshLoadTestDuration time.Duration
-	var churnMode, incrementalPattern, externalHost string
+	var churnMode, incrementalPattern, externalHost, awsRegion, awsInstanceType, awsInstanceIDFile string
+	var awsMaxTargets int
 	var metricsProfiles []string
 	var rc int
 	cmd := &cobra.Command{
@@ -224,6 +242,12 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 					incrementalPattern, incrementalStepSize, incrementalStepSize/namespacesPerCudn, incrementalStepDelay)
 			}
 
+			// Set defaults for external-aws-infra template vars (overridden when --external-aws-infra=true)
+			AdditionalVars["CLIENT_NODE_HOSTNAME"] = ""
+			AdditionalVars["SERVER_NODE_HOSTNAME"] = ""
+			AdditionalVars["EXTERNAL_START_IP"] = ""
+			AdditionalVars["EXTERNAL_END_IP"] = ""
+
 			AdditionalVars["PPROF"] = pprof
 			AdditionalVars["PPROF_INTERVAL"] = pprofInterval.String()
 			AdditionalVars["JOB_PAUSE"] = jobPause
@@ -266,6 +290,45 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 				AdditionalVars["EXTERNAL_HOST"] = externalHost
 				AdditionalVars["EXTERNAL_HOST_CIDR"] = externalHost + "/32"
 			}
+			// External AWS infra setup for Scenario B (external IP + NodePort)
+			if externalAWSInfra {
+				workerNodes, err := getWorkerNodesSorted()
+				if err != nil {
+					log.Fatalf("Failed to get worker nodes: %v", err)
+				}
+				if len(workerNodes) < 2 {
+					log.Fatal("--external-aws-infra requires at least 2 worker nodes")
+				}
+				clientNode := workerNodes[0]
+				serverNode := workerNodes[1]
+				AdditionalVars["CLIENT_NODE_HOSTNAME"] = clientNode.Name
+				AdditionalVars["SERVER_NODE_HOSTNAME"] = serverNode.Name
+
+				infra, err := utils.NewExternalTargetInfra(awsRegion)
+				if err == nil {
+					infra.InstanceIDFile = awsInstanceIDFile
+				}
+				if err != nil {
+					log.Fatalf("Failed to init AWS client: %v", err)
+				}
+				if err := infra.CreateInstance(context.Background(), clientNode.Name, awsInstanceType, awsMaxTargets); err != nil {
+					log.Fatalf("Failed to create external target instance: %v", err)
+				}
+				// Write instance ID to file for teardown step (defer may not run if container killed)
+				if awsInstanceIDFile != "" {
+					if err := os.WriteFile(awsInstanceIDFile, []byte(infra.InstanceID), 0644); err != nil {
+						log.Warnf("Failed to write instance ID to %s: %v", awsInstanceIDFile, err)
+					} else {
+						log.Infof("Instance ID %s written to %s", infra.InstanceID, awsInstanceIDFile)
+					}
+				}
+				defer infra.Destroy(context.Background())
+
+				AdditionalVars["EXTERNAL_START_IP"] = infra.StartIP
+				AdditionalVars["EXTERNAL_END_IP"] = infra.EndIP
+				log.Infof("External target ready: IP=%s, range %s-%s", infra.PrivateIP, infra.StartIP, infra.EndIP)
+			}
+
 			wh.SetMeasurements(cudnMeasurementFactoryMap)
 			rc = RunWorkload(cmd, wh, cmd.Name()+".yml")
 		},
@@ -299,6 +362,11 @@ func NewCudnDensity(wh *workloads.WorkloadHelper) *cobra.Command {
 	cmd.Flags().DurationVar(&sshLoadTestDuration, "ssh-load-test-duration", 5*time.Minute, "Duration to run the SSH load test")
 	cmd.Flags().StringVar(&externalHost, "external-host", "", "IP address of the external host running the SSH check, used for BGP setup and NetworkPolicy rules. Required when --bgp is set")
 	cmd.Flags().StringSliceVar(&metricsProfiles, "metrics-profile", []string{"metrics.yml"}, "Comma separated list of metrics profiles to use")
+	cmd.Flags().BoolVar(&externalAWSInfra, "external-aws-infra", false, "Automatically create external EC2 instance with ipvlan targets for Scenario B (external IP + NodePort) testing")
+	cmd.Flags().StringVar(&awsRegion, "aws-region", "us-east-2", "AWS region for external target instance (used with --external-aws-infra)")
+	cmd.Flags().StringVar(&awsInstanceType, "aws-instance-type", "m5.4xlarge", "EC2 instance type for external target (used with --external-aws-infra)")
+	cmd.Flags().IntVar(&awsMaxTargets, "aws-max-targets", 25, "Number of ipvlan target IPs to create on external instance (used with --external-aws-infra)")
+	cmd.Flags().StringVar(&awsInstanceIDFile, "aws-instance-id-file", "", "File path to write external EC2 instance ID for teardown (used with --external-aws-infra)")
 	cmd.MarkFlagRequired("iterations")
 	return cmd
 }
